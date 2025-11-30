@@ -8,7 +8,7 @@ This application connects to WhatsApp Web and monitors group messages in real-ti
 
 ### Key Features
 
-- **AI-Powered Detection**: Uses Claude Haiku 4.5 for intelligent spam classification (optional)
+- **AI-Powered Detection**: Supports Claude (Anthropic) or Gemini (Google) for intelligent spam classification
 - **Rule-Based Detection**: Works without API key - catches trading/crypto/training group invites
 - **Real-time Monitoring**: Listens to all group messages via WhatsApp Web
 - **Auto-deletion**: Removes spam messages for everyone (requires admin privileges)
@@ -104,7 +104,9 @@ cp .env.example .env
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `ANTHROPIC_API_KEY` | No | - | Your Anthropic API key (enables AI detection) |
+| `ANTHROPIC_API_KEY` | No | - | Anthropic API key for Claude AI |
+| `GEMINI_API_KEY` | No | - | Google API key for Gemini AI ([free tier](https://ai.google.dev/)) |
+| `AI_PROVIDER` | No | `auto` | AI provider: `anthropic`, `gemini`, or `auto` |
 | `DRY_RUN` | No | `true` | Set to `false` to enable message deletion |
 | `USE_AI` | No | `true` | Set to `false` to use only rule-based detection |
 | `MONITORED_GROUPS` | No | (all) | Comma-separated group IDs to monitor |
@@ -166,10 +168,13 @@ npm start
 - Identifies MLM/pyramid schemes, gambling, adult content
 - High-confidence spam phrases trigger instant detection
 
-**AI Detection** (requires Anthropic API key):
-- Uses Claude Haiku 4.5 for intelligent classification
+**AI Detection** (requires API key):
+- **Claude** (Anthropic): Uses Claude Haiku 4.5 for intelligent classification
+- **Gemini** (Google): Uses Gemini 2.0 Flash - has free tier!
 - Analyzes context and nuance
 - Better at edge cases and new spam patterns
+
+Use `AI_PROVIDER=auto` to automatically select available provider (Anthropic preferred).
 
 ### What's Detected as Spam
 

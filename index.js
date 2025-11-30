@@ -5,14 +5,36 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
+// Determine which AI provider to use
+const AI_PROVIDER = process.env.AI_PROVIDER?.toLowerCase() || "auto";
+const hasAnthropicKey = !!process.env.ANTHROPIC_API_KEY;
+const hasGeminiKey = !!process.env.GEMINI_API_KEY;
+
+// Auto-detect provider if not specified
+function getActiveProvider() {
+  if (AI_PROVIDER === "anthropic" && hasAnthropicKey) return "anthropic";
+  if (AI_PROVIDER === "gemini" && hasGeminiKey) return "gemini";
+  if (AI_PROVIDER === "auto") {
+    if (hasAnthropicKey) return "anthropic";
+    if (hasGeminiKey) return "gemini";
+  }
+  return null;
+}
+
+const activeProvider = getActiveProvider();
+
 // Configuration
 const CONFIG = {
   // Add group IDs to monitor (get these from logs when bot joins)
   // Leave empty to monitor ALL groups you're admin of
   monitoredGroups: process.env.MONITORED_GROUPS?.split(",").filter(Boolean) || [],
 
-  // Anthropic API key (optional - enables AI detection)
+  // API keys (optional - enables AI detection)
   anthropicApiKey: process.env.ANTHROPIC_API_KEY,
+  geminiApiKey: process.env.GEMINI_API_KEY,
+
+  // Active AI provider
+  aiProvider: activeProvider,
 
   // Whether to actually delete messages or just log (for testing)
   dryRun: process.env.DRY_RUN === "true",
@@ -21,16 +43,23 @@ const CONFIG = {
   customSpamKeywords: process.env.SPAM_KEYWORDS?.split(",").filter(Boolean) || [],
 
   // Enable/disable AI detection (auto-disabled if no API key)
-  useAI: process.env.USE_AI !== "false" && !!process.env.ANTHROPIC_API_KEY,
+  useAI: process.env.USE_AI !== "false" && !!activeProvider,
 };
 
-// Initialize Anthropic client only if API key is provided
+// Initialize AI clients based on provider
 let anthropic = null;
-if (CONFIG.anthropicApiKey) {
+let gemini = null;
+
+if (CONFIG.aiProvider === "anthropic" && CONFIG.anthropicApiKey) {
   const Anthropic = (await import("@anthropic-ai/sdk")).default;
   anthropic = new Anthropic({
     apiKey: CONFIG.anthropicApiKey,
   });
+}
+
+if (CONFIG.aiProvider === "gemini" && CONFIG.geminiApiKey) {
+  const { GoogleGenerativeAI } = await import("@google/generative-ai");
+  gemini = new GoogleGenerativeAI(CONFIG.geminiApiKey);
 }
 
 // Initialize WhatsApp client with local session storage
@@ -171,47 +200,8 @@ function detectSpamGroupInvite(message) {
   return { isSpam: false, confidence: 0, reason: "No spam patterns detected" };
 }
 
-/**
- * Main spam detection function
- * Uses rule-based detection first, then AI if available
- */
-async function isSpamMessage(message, senderName, groupName) {
-  const lowerMessage = message.toLowerCase();
-
-  // 1. Check custom keywords first (fastest)
-  for (const keyword of CONFIG.customSpamKeywords) {
-    if (lowerMessage.includes(keyword.toLowerCase())) {
-      return { isSpam: true, confidence: 100, reason: `Contains blocked keyword: ${keyword}` };
-    }
-  }
-
-  // 2. Rule-based detection for group invites (works without AI)
-  const ruleBasedResult = detectSpamGroupInvite(message);
-  if (ruleBasedResult.isSpam) {
-    return ruleBasedResult;
-  }
-
-  // 3. If AI is not available, return rule-based result
-  if (!CONFIG.useAI || !anthropic) {
-    return ruleBasedResult;
-  }
-
-  // 4. AI-powered detection (if API key available)
-  // Rate limiting for AI calls
-  if (checksThisMinute >= MAX_CHECKS_PER_MINUTE) {
-    console.log("⚠️  Rate limit reached, skipping AI check");
-    return { isSpam: false, confidence: 0, reason: "Rate limited - using rule-based only" };
-  }
-  checksThisMinute++;
-
-  try {
-    const response = await anthropic.messages.create({
-      model: "claude-haiku-4-5-20250929",
-      max_tokens: 150,
-      messages: [
-        {
-          role: "user",
-          content: `You are a spam detection system for a WhatsApp group. Analyze this message and determine if it's spam.
+// Shared spam detection prompt
+const SPAM_DETECTION_PROMPT = (groupName, senderName, message) => `You are a spam detection system for a WhatsApp group. Analyze this message and determine if it's spam.
 
 SPAM indicators:
 - Unsolicited promotions, ads, or marketing
@@ -236,16 +226,88 @@ Sender: ${senderName}
 Message: "${message}"
 
 Respond with ONLY a JSON object (no markdown):
-{"isSpam": true/false, "confidence": 0-100, "reason": "brief explanation"}`,
-        },
-      ],
-    });
+{"isSpam": true/false, "confidence": 0-100, "reason": "brief explanation"}`;
 
-    const content = response.content[0].text.trim();
+/**
+ * AI spam detection using Anthropic Claude
+ */
+async function detectWithAnthropic(message, senderName, groupName) {
+  const response = await anthropic.messages.create({
+    model: "claude-haiku-4-5-20250929",
+    max_tokens: 150,
+    messages: [
+      {
+        role: "user",
+        content: SPAM_DETECTION_PROMPT(groupName, senderName, message),
+      },
+    ],
+  });
+  return response.content[0].text.trim();
+}
 
-    // Parse JSON response
+/**
+ * AI spam detection using Google Gemini
+ */
+async function detectWithGemini(message, senderName, groupName) {
+  const model = gemini.getGenerativeModel({ model: "gemini-2.0-flash" });
+  const result = await model.generateContent(SPAM_DETECTION_PROMPT(groupName, senderName, message));
+  return result.response.text().trim();
+}
+
+/**
+ * Main spam detection function
+ * Uses rule-based detection first, then AI if available
+ */
+async function isSpamMessage(message, senderName, groupName) {
+  const lowerMessage = message.toLowerCase();
+
+  // 1. Check custom keywords first (fastest)
+  for (const keyword of CONFIG.customSpamKeywords) {
+    if (lowerMessage.includes(keyword.toLowerCase())) {
+      return { isSpam: true, confidence: 100, reason: `Contains blocked keyword: ${keyword}` };
+    }
+  }
+
+  // 2. Rule-based detection for group invites (works without AI)
+  const ruleBasedResult = detectSpamGroupInvite(message);
+  if (ruleBasedResult.isSpam) {
+    return ruleBasedResult;
+  }
+
+  // 3. If AI is not available, return rule-based result
+  if (!CONFIG.useAI || (!anthropic && !gemini)) {
+    return ruleBasedResult;
+  }
+
+  // 4. AI-powered detection (if API key available)
+  // Rate limiting for AI calls
+  if (checksThisMinute >= MAX_CHECKS_PER_MINUTE) {
+    console.log("⚠️  Rate limit reached, skipping AI check");
+    return { isSpam: false, confidence: 0, reason: "Rate limited - using rule-based only" };
+  }
+  checksThisMinute++;
+
+  try {
+    let content;
+
+    // Use the configured AI provider
+    if (CONFIG.aiProvider === "anthropic" && anthropic) {
+      content = await detectWithAnthropic(message, senderName, groupName);
+    } else if (CONFIG.aiProvider === "gemini" && gemini) {
+      content = await detectWithGemini(message, senderName, groupName);
+    } else {
+      return ruleBasedResult;
+    }
+
+    // Parse JSON response (handle markdown code blocks)
+    const jsonMatch = content.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      console.error("Failed to find JSON in AI response:", content);
+      return { isSpam: false, confidence: 0, reason: "Parse error" };
+    }
+
     try {
-      const result = JSON.parse(content);
+      const result = JSON.parse(jsonMatch[0]);
       return {
         isSpam: result.isSpam && result.confidence >= 70,
         reason: result.reason,
@@ -358,7 +420,14 @@ client.on("auth_failure", (msg) => {
 client.on("ready", async () => {
   console.log("\n🚀 WhatsApp Spam Guard is ready!");
   console.log(`📋 Mode: ${CONFIG.dryRun ? "DRY RUN (no deletions)" : "LIVE (will delete spam)"}`);
-  console.log(`🤖 Detection: ${CONFIG.useAI ? "AI + Rule-based" : "Rule-based only (no API key)"}`);
+
+  // Show detection mode with provider name
+  let detectionMode = "Rule-based only (no API key)";
+  if (CONFIG.useAI && CONFIG.aiProvider) {
+    const providerNames = { anthropic: "Claude", gemini: "Gemini" };
+    detectionMode = `${providerNames[CONFIG.aiProvider] || CONFIG.aiProvider} AI + Rule-based`;
+  }
+  console.log(`🤖 Detection: ${detectionMode}`);
   console.log(`🔑 Bot number: ${client.info.wid.user}`);
 
   // List all groups
