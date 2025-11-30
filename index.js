@@ -1,7 +1,6 @@
 import pkg from "whatsapp-web.js";
 const { Client, LocalAuth } = pkg;
 import qrcode from "qrcode-terminal";
-import Anthropic from "@anthropic-ai/sdk";
 import dotenv from "dotenv";
 
 dotenv.config();
@@ -12,20 +11,27 @@ const CONFIG = {
   // Leave empty to monitor ALL groups you're admin of
   monitoredGroups: process.env.MONITORED_GROUPS?.split(",").filter(Boolean) || [],
 
-  // Anthropic API key
+  // Anthropic API key (optional - enables AI detection)
   anthropicApiKey: process.env.ANTHROPIC_API_KEY,
 
   // Whether to actually delete messages or just log (for testing)
   dryRun: process.env.DRY_RUN === "true",
 
-  // Custom spam criteria (optional - enhances AI detection)
+  // Custom spam criteria (optional - enhances detection)
   customSpamKeywords: process.env.SPAM_KEYWORDS?.split(",").filter(Boolean) || [],
+
+  // Enable/disable AI detection (auto-disabled if no API key)
+  useAI: process.env.USE_AI !== "false" && !!process.env.ANTHROPIC_API_KEY,
 };
 
-// Initialize Anthropic client
-const anthropic = new Anthropic({
-  apiKey: CONFIG.anthropicApiKey,
-});
+// Initialize Anthropic client only if API key is provided
+let anthropic = null;
+if (CONFIG.anthropicApiKey) {
+  const Anthropic = (await import("@anthropic-ai/sdk")).default;
+  anthropic = new Anthropic({
+    apiKey: CONFIG.anthropicApiKey,
+  });
+}
 
 // Initialize WhatsApp client with local session storage
 const client = new Client({
@@ -57,24 +63,146 @@ setInterval(() => {
   checksThisMinute = 0;
 }, RATE_LIMIT_WINDOW);
 
-/**
- * Detect spam using Claude Haiku
- */
-async function isSpamMessage(message, senderName, groupName) {
-  // Rate limiting
-  if (checksThisMinute >= MAX_CHECKS_PER_MINUTE) {
-    console.log("⚠️  Rate limit reached, skipping AI check");
-    return { isSpam: false, reason: "Rate limited" };
-  }
-  checksThisMinute++;
+// Spam patterns for rule-based detection (works without AI)
+const SPAM_PATTERNS = {
+  // WhatsApp group invite link pattern
+  groupInviteRegex: /chat\.whatsapp\.com\/[A-Za-z0-9]{20,}/gi,
 
-  // Quick keyword pre-filter (saves API calls)
+  // Suspicious keywords that indicate spam group invites
+  spamGroupKeywords: [
+    // Trading/Forex
+    "trading", "forex", "fx signal", "trade signal", "pip", "lot size",
+    "forex vip", "trading vip", "profit signal", "free signal",
+    // Crypto
+    "crypto", "bitcoin", "btc", "eth", "binance", "coinbase", "nft",
+    "token", "airdrop", "pump", "moonshot", "100x", "1000x",
+    "crypto vip", "bitcoin signal", "crypto signal",
+    // Investment scams
+    "investment", "invest now", "guaranteed profit", "daily profit",
+    "passive income", "financial freedom", "get rich", "make money",
+    "earn money", "income opportunity", "profit guaranteed",
+    // Training/Course scams
+    "training", "course", "masterclass", "webinar", "free class",
+    "learn trading", "trading course", "forex course", "crypto course",
+    "mentorship", "coaching", "academy",
+    // MLM/Pyramid
+    "mlm", "network marketing", "referral bonus", "join my team",
+    "business opportunity", "work from home", "be your own boss",
+    // Gambling
+    "betting", "casino", "gambling", "slot", "jackpot", "lucky draw",
+    // Adult/Dating
+    "dating", "singles", "hookup", "adult", "18+",
+  ],
+
+  // High-confidence spam phrases (instant delete)
+  highConfidenceSpam: [
+    "join my trading group",
+    "join my crypto group",
+    "join my forex group",
+    "vip signal group",
+    "free trading signals",
+    "guaranteed returns",
+    "double your money",
+    "100% profit",
+    "join and earn",
+    "click link to join",
+  ],
+};
+
+/**
+ * Rule-based spam detection for group invite links
+ * Works without AI - detects trading/crypto/training group invites
+ */
+function detectSpamGroupInvite(message) {
   const lowerMessage = message.toLowerCase();
-  for (const keyword of CONFIG.customSpamKeywords) {
-    if (lowerMessage.includes(keyword.toLowerCase())) {
-      return { isSpam: true, reason: `Contains blocked keyword: ${keyword}` };
+
+  // Check if message contains a WhatsApp group invite link
+  const hasGroupInvite = SPAM_PATTERNS.groupInviteRegex.test(message);
+  // Reset regex lastIndex
+  SPAM_PATTERNS.groupInviteRegex.lastIndex = 0;
+
+  // Check for high-confidence spam phrases first
+  for (const phrase of SPAM_PATTERNS.highConfidenceSpam) {
+    if (lowerMessage.includes(phrase)) {
+      return {
+        isSpam: true,
+        confidence: 95,
+        reason: `High-confidence spam phrase: "${phrase}"`,
+      };
     }
   }
+
+  // If there's a group invite link, check for suspicious keywords
+  if (hasGroupInvite) {
+    const matchedKeywords = SPAM_PATTERNS.spamGroupKeywords.filter(
+      keyword => lowerMessage.includes(keyword.toLowerCase())
+    );
+
+    if (matchedKeywords.length >= 2) {
+      return {
+        isSpam: true,
+        confidence: 90,
+        reason: `Group invite with spam keywords: ${matchedKeywords.slice(0, 3).join(", ")}`,
+      };
+    }
+
+    if (matchedKeywords.length === 1) {
+      return {
+        isSpam: true,
+        confidence: 75,
+        reason: `Group invite with suspicious keyword: ${matchedKeywords[0]}`,
+      };
+    }
+  }
+
+  // Check for suspicious keyword combinations even without group link
+  const matchedKeywords = SPAM_PATTERNS.spamGroupKeywords.filter(
+    keyword => lowerMessage.includes(keyword.toLowerCase())
+  );
+
+  if (matchedKeywords.length >= 3) {
+    return {
+      isSpam: true,
+      confidence: 80,
+      reason: `Multiple spam indicators: ${matchedKeywords.slice(0, 3).join(", ")}`,
+    };
+  }
+
+  return { isSpam: false, confidence: 0, reason: "No spam patterns detected" };
+}
+
+/**
+ * Main spam detection function
+ * Uses rule-based detection first, then AI if available
+ */
+async function isSpamMessage(message, senderName, groupName) {
+  const lowerMessage = message.toLowerCase();
+
+  // 1. Check custom keywords first (fastest)
+  for (const keyword of CONFIG.customSpamKeywords) {
+    if (lowerMessage.includes(keyword.toLowerCase())) {
+      return { isSpam: true, confidence: 100, reason: `Contains blocked keyword: ${keyword}` };
+    }
+  }
+
+  // 2. Rule-based detection for group invites (works without AI)
+  const ruleBasedResult = detectSpamGroupInvite(message);
+  if (ruleBasedResult.isSpam) {
+    return ruleBasedResult;
+  }
+
+  // 3. If AI is not available, return rule-based result
+  if (!CONFIG.useAI || !anthropic) {
+    return ruleBasedResult;
+  }
+
+  // 4. AI-powered detection (if API key available)
+  // Rate limiting for AI calls
+  if (checksThisMinute >= MAX_CHECKS_PER_MINUTE) {
+    console.log("⚠️  Rate limit reached, skipping AI check");
+    return { isSpam: false, confidence: 0, reason: "Rate limited - using rule-based only" };
+  }
+  checksThisMinute++;
 
   try {
     const response = await anthropic.messages.create({
@@ -125,11 +253,11 @@ Respond with ONLY a JSON object (no markdown):
       };
     } catch {
       console.error("Failed to parse AI response:", content);
-      return { isSpam: false, reason: "Parse error" };
+      return { isSpam: false, confidence: 0, reason: "Parse error" };
     }
   } catch (error) {
     console.error("AI detection error:", error.message);
-    return { isSpam: false, reason: "API error" };
+    return { isSpam: false, confidence: 0, reason: "API error" };
   }
 }
 
@@ -182,7 +310,7 @@ async function handleMessage(message) {
     const spamCheck = await isSpamMessage(message.body, senderName, chat.name);
 
     if (spamCheck.isSpam) {
-      console.log(`🚨 SPAM DETECTED (${spamCheck.confidence}%): ${spamCheck.reason}`);
+      console.log(`🚨 SPAM DETECTED${spamCheck.confidence ? ` (${spamCheck.confidence}%)` : ""}: ${spamCheck.reason}`);
 
       // Verify we're admin before attempting delete
       const isAdmin = await isBotAdmin(chat);
@@ -230,6 +358,7 @@ client.on("auth_failure", (msg) => {
 client.on("ready", async () => {
   console.log("\n🚀 WhatsApp Spam Guard is ready!");
   console.log(`📋 Mode: ${CONFIG.dryRun ? "DRY RUN (no deletions)" : "LIVE (will delete spam)"}`);
+  console.log(`🤖 Detection: ${CONFIG.useAI ? "AI + Rule-based" : "Rule-based only (no API key)"}`);
   console.log(`🔑 Bot number: ${client.info.wid.user}`);
 
   // List all groups

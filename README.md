@@ -8,7 +8,8 @@ This application connects to WhatsApp Web and monitors group messages in real-ti
 
 ### Key Features
 
-- **AI-Powered Detection**: Uses Claude Haiku 4.5 for intelligent spam classification
+- **AI-Powered Detection**: Uses Claude Haiku 4.5 for intelligent spam classification (optional)
+- **Rule-Based Detection**: Works without API key - catches trading/crypto/training group invites
 - **Real-time Monitoring**: Listens to all group messages via WhatsApp Web
 - **Auto-deletion**: Removes spam messages for everyone (requires admin privileges)
 - **Keyword Pre-filtering**: Fast detection for known spam terms (saves API costs)
@@ -103,8 +104,9 @@ cp .env.example .env
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `ANTHROPIC_API_KEY` | Yes | - | Your Anthropic API key |
+| `ANTHROPIC_API_KEY` | No | - | Your Anthropic API key (enables AI detection) |
 | `DRY_RUN` | No | `true` | Set to `false` to enable message deletion |
+| `USE_AI` | No | `true` | Set to `false` to use only rule-based detection |
 | `MONITORED_GROUPS` | No | (all) | Comma-separated group IDs to monitor |
 | `SPAM_KEYWORDS` | No | (preset) | Comma-separated keywords for quick detection |
 
@@ -156,6 +158,19 @@ npm start
 
 ## Spam Detection
 
+### Detection Modes
+
+**Rule-Based Detection** (works without API key):
+- Detects WhatsApp group invite links with spam keywords
+- Catches trading/forex, crypto, training/course scams
+- Identifies MLM/pyramid schemes, gambling, adult content
+- High-confidence spam phrases trigger instant detection
+
+**AI Detection** (requires Anthropic API key):
+- Uses Claude Haiku 4.5 for intelligent classification
+- Analyzes context and nuance
+- Better at edge cases and new spam patterns
+
 ### What's Detected as Spam
 
 - Unsolicited promotions and advertisements
@@ -166,6 +181,7 @@ npm start
 - Fake giveaways or prizes
 - Pyramid schemes / MLM recruitment
 - Requests for personal/financial information
+- **Group invites** for trading, crypto, training courses
 
 ### What's NOT Spam
 
@@ -177,9 +193,9 @@ npm start
 
 ### Confidence Threshold
 
-Messages are only deleted if Claude returns:
-- `isSpam: true`
-- `confidence >= 70%`
+Messages are only deleted if:
+- Rule-based: confidence >= 75%
+- AI-based: confidence >= 70%
 
 This prevents false positives on borderline messages.
 
