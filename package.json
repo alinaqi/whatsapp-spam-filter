@@ -1,0 +1,20 @@
+{
+  "name": "whatsapp-spam-guard",
+  "version": "1.0.0",
+  "description": "WhatsApp group spam detector using Claude AI",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.52.0",
+    "whatsapp-web.js": "^1.26.0",
+    "qrcode-terminal": "^0.12.0",
+    "dotenv": "^16.4.5"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
