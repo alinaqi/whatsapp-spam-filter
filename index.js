@@ -172,9 +172,9 @@ async function handleMessage(message) {
     // Skip non-text messages for now
     if (!message.body || message.body.trim() === "") return;
 
-    // Get sender info
-    const contact = await message.getContact();
-    const senderName = contact.pushname || contact.number || "Unknown";
+    // Get sender info (using message properties to avoid getContact() compatibility issues)
+    const senderId = message.author || message.from;
+    const senderName = message._data?.notifyName || senderId?.split("@")[0] || "Unknown";
 
     console.log(`\n📨 [${chat.name}] ${senderName}: ${message.body.substring(0, 50)}...`);
 
